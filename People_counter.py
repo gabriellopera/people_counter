@@ -4,9 +4,22 @@ import numpy as np
 # Abrir el video desde la ubicación especificada
 video = cv2.VideoCapture('C:/Users/gloperma/Downloads/prueba.mp4')
 
-# Inicializar variables de conteo y estado de liberación
-contador = 0
-liberado = False
+# Crear el objeto para la sustracción de fondo
+fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=100, detectShadows=True)
+
+# Inicializar variables de seguimiento y conteo
+object_centroids = {}  # Diccionario para almacenar los centroides de los objetos detectados
+object_id = 0  # ID del objeto
+crossed_objects = set()  # Conjunto de objetos que han cruzado la región de interés
+rect_color = (255, 0, 0)  # Color inicial del rectángulo (azul)
+crossing = False  # Indicador de cruce de persona
+
+# Definir una función para calcular la distancia euclidiana
+def euclidean_distance(a, b):
+    return np.linalg.norm(np.array(a) - np.array(b))
+
+# Definir la región de interés (rectángulo)
+roi_x, roi_y, roi_w, roi_h = 390, 100, 30, 150  # Ajustar estas coordenadas según sea necesario
 
 # Bucle principal para procesar cada fotograma del video
 while True:
@@ -17,46 +30,74 @@ while True:
         break  # Salir del bucle si no se puede leer el fotograma
 
     # Redimensionar la imagen a un tamaño específico
-    img = cv2.resize(img, (640, 480))
-    # Convertir la imagen a escala de grises
-    imgGray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    # Aplicar umbralización adaptativa para obtener una imagen binaria
-    imgTh = cv2.adaptiveThreshold(imgGray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 12)
-    # Dilatar la imagen binaria para mejorar la detección de bordes
-    kernel = np.ones((8, 8), np.uint8)
-    imgDil = cv2.dilate(imgTh, kernel, iterations=2)
+    img = cv2.resize(img, (640, 480))   
 
-    # Definir la región de interés
-    x, y, w, h = 390, 100, 30, 150
-    recorte = imgDil[y:y+h, x:x+w]
-    # Contar el número de píxeles blancos en la región de interés
-    brancos = cv2.countNonZero(recorte)
+    # Aplicar sustracción de fondo para obtener la máscara de movimiento
+    fgmask = fgbg.apply(img)
+    
+    # Eliminar ruido y sombras de la máscara de movimiento
+    kernel = np.ones((5, 5), np.uint8)
+    fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel)
+    fgmask = cv2.dilate(fgmask, kernel, iterations=2)
 
-    # Actualizar el contador si se detecta un número suficiente de píxeles blancos y se cumple una condición de liberación
-    if brancos > 4000 and liberado:
-        contador += 1
-    # Actualizar el estado de liberación basado en el número de píxeles blancos
-    if brancos < 4000:
-        liberado = True
+    # Encontrar contornos en la máscara de movimiento
+    contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Lista para almacenar los centroides de los objetos detectados
+    detected_centroids = []
+    # Dibujar contornos en el fotograma original
+    for contour in contours:
+        # Filtrar contornos pequeños para evitar falsos positivos
+        if cv2.contourArea(contour) > 1000:  # Area para evitar contornos muy pequeños
+            x_cont, y_cont, w_cont, h_cont = cv2.boundingRect(contour)
+            if 30 < w_cont < 300 and 30 < h_cont < 300:  #Condicion para que los contornos se considere que pertenecen a una persona 
+                cv2.rectangle(img, (x_cont, y_cont), (x_cont + w_cont, y_cont + h_cont), (0, 255, 0), 2)
+                centroid = (int(x_cont + w_cont / 2), int(y_cont + h_cont / 2))
+                detected_centroids.append(centroid)
+
+    # Dibujar el rectángulo de la región de interés
+    cv2.rectangle(img, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), rect_color, 4)
+
+    # Actualizar el seguimiento de centroides
+    new_object_centroids = {}
+    for centroid in detected_centroids:
+        found = False
+        for obj_id, previous_centroid in object_centroids.items():
+            if euclidean_distance(centroid, previous_centroid) < 50:
+                new_object_centroids[obj_id] = centroid
+                found = True
+                break
+        if not found:
+            new_object_centroids[object_id] = centroid
+            object_id += 1
+
+    object_centroids = new_object_centroids
+
+    # Verificar el cruce del rectángulo
+    for obj_id, centroid in object_centroids.items():
+        if (roi_x < centroid[0] < roi_x + roi_w) and (roi_y < centroid[1] < roi_y + roi_h):
+            if obj_id not in crossed_objects:
+                crossed_objects.add(obj_id)
+                crossing = True
+        else:
+            if obj_id in crossed_objects:
+                crossing = False
+
+    # Actualizar el contador de personas cruzadas
+    total_crossed = len(crossed_objects)
+
+    # Cambiar el color del rectángulo según el estado de cruce
+    if crossing:
+        rect_color = (0, 255, 0)  # Cambiar a verde si alguien está cruzando
     else:
-        liberado = False
+        rect_color = (255, 0, 0)  # Volver a azul si nadie está cruzando
 
-    # Dibujar un rectángulo alrededor de la región de interés en el fotograma original
-    if not liberado:
-        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 4)
-    else:
-        cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 255), 4)
+    # Mostrar el contador de personas en el fotograma
+    cv2.putText(img, f'Personas: {total_crossed}', (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # Dibujar un rectángulo en la imagen binaria
-    cv2.rectangle(imgTh, (x, y), (x + w, y + h), (255, 255, 255), 6)
-
-    # Mostrar el número de píxeles blancos y el contador en el fotograma
-    cv2.putText(img, str(brancos), (x - 30, y - 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 1)
-    cv2.rectangle(img, (575, 155), (575 + 88, 155 + 85), (255, 255, 255), -1)
-    cv2.putText(img, str(contador), (x + 100, y), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 0, 0), 3)
-
-    # Mostrar el fotograma procesado
+    # Mostrar el fotograma procesado y la máscara de fondo
     cv2.imshow('video original', img)
+    cv2.imshow('Foreground Mask', fgmask)
 
     # Salir del bucle si se presiona la tecla 'q'
     if cv2.waitKey(20) & 0xFF == ord('q'):
